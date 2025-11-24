@@ -23,11 +23,12 @@ metric computation itself, not the upstream model execution.
 """
 
 import argparse
+import gzip
 import json
 import os
 import sys
 import time
-import gzip
+
 import numpy as np
 
 VALID_METRICS = {
@@ -103,10 +104,16 @@ def compute_per_population_stats(y_true, y_pred):
         pop_accuracy = float(correct / pop_size) if pop_size else float("nan")
         pop_precision = float(tp / (tp + fp)) if (tp + fp) else float("nan")
         pop_recall = float(tp / (tp + fn)) if (tp + fn) else float("nan")
-        if np.isnan(pop_precision) or np.isnan(pop_recall) or (pop_precision + pop_recall) == 0:
+        if (
+            np.isnan(pop_precision)
+            or np.isnan(pop_recall)
+            or (pop_precision + pop_recall) == 0
+        ):
             pop_f1 = float("nan")
         else:
-            pop_f1 = float(2 * pop_precision * pop_recall / (pop_precision + pop_recall))
+            pop_f1 = float(
+                2 * pop_precision * pop_recall / (pop_precision + pop_recall)
+            )
 
         per_population[str(label)] = {
             "accuracy": pop_accuracy,
@@ -158,7 +165,9 @@ def metric_runtime(runtime_seconds):
 
 def metric_scalability(runtime_seconds, n_items):
     return {
-        "scalability_seconds_per_item": float(runtime_seconds / n_items) if n_items else float("nan")
+        "scalability_seconds_per_item": (
+            float(runtime_seconds / n_items) if n_items else float("nan")
+        )
     }
 
 
@@ -182,7 +191,9 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
         macro_precision, macro_recall, macro_f1 = compute_macro_scores(per_population)
         base_stats = {
             "per_population": per_population,
-            "overall_accuracy": float((y_true == y_pred).mean()) if y_true.size else float("nan"),
+            "overall_accuracy": (
+                float((y_true == y_pred).mean()) if y_true.size else float("nan")
+            ),
             "macro_precision": macro_precision,
             "macro_recall": macro_recall,
             "macro_f1": macro_f1,
@@ -217,7 +228,7 @@ def main():
     parser = argparse.ArgumentParser(description="Flow prediction metrics runner")
 
     parser.add_argument(
-        "--clustering.predicted_ks_range",
+        "--analysis.prediction",
         type=str,
         required=True,
         help="csv text file with header row (k values) and columns of predictions",
@@ -248,7 +259,9 @@ def main():
         sys.exit(0)
 
     truth = load_true_labels(getattr(args, "data.true_labels"))
-    ks, predicted = load_predicted_labels(getattr(args, "clustering.predicted_ks_range"))
+    ks, predicted = load_predicted_labels(
+        getattr(args, "clustering.predicted_ks_range")
+    )
     metrics_to_compute = parse_metric_argument(args.metric)
 
     if predicted.shape[0] != truth.shape[0]:
@@ -258,7 +271,9 @@ def main():
 
     results = {}
     for idx, k_label in enumerate(ks):
-        metrics_for_k = compute_prediction_metrics(truth, predicted[:, idx], metrics_to_compute)
+        metrics_for_k = compute_prediction_metrics(
+            truth, predicted[:, idx], metrics_to_compute
+        )
         results[str(k_label)] = metrics_for_k
 
     payload = {
