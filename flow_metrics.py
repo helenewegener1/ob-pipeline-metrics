@@ -343,7 +343,7 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    truth = load_true_labels(getattr(args, "data.true_labels"))
+    truth = load_true_labels(getattr(args, "labels_test"))
     ks, predicted = load_predicted_labels(getattr(args, "analysis.prediction"))
     metrics_to_compute = parse_metric_argument(args.metric)
 
