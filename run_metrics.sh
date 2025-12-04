@@ -16,6 +16,6 @@ python_bin="${script_dir}/.venv/bin/python"
 "${python_bin}" "${script_dir}/flow_metrics.py" \
   --name "random" \
   --output_dir "${script_dir}/out/data/metrics/all/flow_metrics" \
-  --analysis.prediction "${script_dir}/out/data/analysis/default/random/random_predicted_labels.txt" \
+  --analysis.prediction "${script_dir}/out/data/analysis/default/random/data_import_predicted_labels.txt" \
   --data.true_labels "${script_dir}/out/data/data_preprocessing/default/data_import.test.labels.gz" \
   --metric "all"
