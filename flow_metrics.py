@@ -105,7 +105,7 @@ def load_true_labels(data_file):
             na_values=["", '""', "nan", "NaN"],
             skip_blank_lines=True,  # <- skip empty lines
         ).iloc[:, 0]
-l
+        
     labels = pd.to_numeric(series, errors="coerce").to_numpy()
     if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
