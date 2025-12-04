@@ -68,33 +68,48 @@ def _has_header(first_line):
     return False
 
 
-def load_true_labels(data_file):
-    """
-    Load labels as 1D array; keeps missing labels as NaN (needed for
-    semi-supervised handling in preprocessing).
-    """
-    first_line = _read_first_line(data_file)
-    has_header = _has_header(first_line)
+# def load_true_labels(data_file):
+#     """
+#     Load labels as 1D array; keeps missing labels as NaN (needed for
+#     semi-supervised handling in preprocessing).
+#     """
+#     first_line = _read_first_line(data_file)
+#     has_header = _has_header(first_line)
+# 
+#     opener = gzip.open if data_file.endswith(".gz") else open
+#     with opener(data_file, "rt") as handle:
+#         series = pd.read_csv(
+#             handle,
+#             header=0 if has_header else None,
+#             comment="#",
+#             na_values=["", '""', "nan", "NaN"],
+#             skip_blank_lines=False,
+#         ).iloc[:, 0]
+# 
+#     try:
+#         labels = pd.to_numeric(series, errors="coerce").to_numpy()
+#     except Exception as exc:
+#         raise ValueError("Invalid data structure, cannot parse labels.") from exc
+# 
+#     if labels.ndim != 1:
+#         raise ValueError("Invalid data structure, not a 1D matrix?")
+#     return labels
 
+def load_true_labels(data_file):
     opener = gzip.open if data_file.endswith(".gz") else open
     with opener(data_file, "rt") as handle:
         series = pd.read_csv(
             handle,
-            header=0 if has_header else None,
+            header=None,
             comment="#",
             na_values=["", '""', "nan", "NaN"],
-            skip_blank_lines=False,
+            skip_blank_lines=True,  # <- skip empty lines
         ).iloc[:, 0]
 
-    try:
-        labels = pd.to_numeric(series, errors="coerce").to_numpy()
-    except Exception as exc:
-        raise ValueError("Invalid data structure, cannot parse labels.") from exc
-
+    labels = pd.to_numeric(series, errors="coerce").to_numpy()
     if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
     return labels
-
 
 def load_predicted_labels(data_file):
     """
