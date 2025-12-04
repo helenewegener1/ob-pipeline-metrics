@@ -14,12 +14,14 @@ Inputs mirror run_metrics:
 
 Metrics implemented (selected via --metric):
 - accuracy, precision, recall, f1 (per-population with macro averages)
+- mcc (Matthews correlation coefficient)
+- popfreq_corr (population frequency correlation)
+- aucroc (AUC ROC macro one-vs-rest)
 - runtime: time spent computing the metrics for that run
 - overlap: Jaccard overlap between predicted and true label sets (ignores 0)
 - scalability: runtime normalized by number of evaluated samples
 
-Note: this is a scaffolding for future refinement; runtime here measures the
-metric computation itself, not the upstream model execution.
+Note: runtime here measures only metric computation, not upstream model execution.
 """
 
 import argparse
@@ -31,6 +33,8 @@ import time
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import matthews_corrcoef, roc_auc_score
+
 
 VALID_METRICS = {
     "accuracy",
@@ -41,22 +45,22 @@ VALID_METRICS = {
     "runtime",
     "overlap",
     "scalability",
+    "mcc",
+    "popfreq_corr",
+    "aucroc",
     "all",
 }
 
-
-CLASSIFICATION_METRICS = {"accuracy", "precision", "recall", "f1"}
+CLASSIFICATION_METRICS = {"accuracy", "precision", "recall", "f1", "mcc", "aucroc"}
 
 
 def _read_first_line(path):
-    """Read the first line of a (possibly gzipped) file."""
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt") as handle:
         return handle.readline()
 
 
 def _has_header(first_line):
-    """Heuristically decide whether the first line is a header row."""
     tokens = [tok for tok in first_line.replace(",", " ").split() if tok]
     if not tokens:
         return False
@@ -69,10 +73,6 @@ def _has_header(first_line):
 
 
 # def load_true_labels(data_file):
-#     """
-#     Load labels as 1D array; keeps missing labels as NaN (needed for
-#     semi-supervised handling in preprocessing).
-#     """
 #     first_line = _read_first_line(data_file)
 #     has_header = _has_header(first_line)
 # 
@@ -105,17 +105,13 @@ def load_true_labels(data_file):
             na_values=["", '""', "nan", "NaN"],
             skip_blank_lines=True,  # <- skip empty lines
         ).iloc[:, 0]
-
+l
     labels = pd.to_numeric(series, errors="coerce").to_numpy()
     if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
     return labels
 
 def load_predicted_labels(data_file):
-    """
-    Load predicted labels allowing for optional header rows and gzip input.
-    Returns a tuple of (column_headers, predictions_matrix).
-    """
     first_line = _read_first_line(data_file)
     has_header = _has_header(first_line)
 
@@ -139,8 +135,7 @@ def load_predicted_labels(data_file):
     try:
         df = _read_with_sep(",")
     except pd.errors.ParserError:
-        # Fallback for whitespace-delimited predictions
-        df = _read_with_sep(r"\\s+")
+        df = _read_with_sep(r"\s+")
 
     if df.empty:
         raise ValueError("Prediction file is empty.")
@@ -169,9 +164,8 @@ def parse_metric_argument(metric_arg):
         raise ValueError("No metrics provided.")
     if "all" in metrics:
         metrics = sorted([m for m in VALID_METRICS if m != "all"])
-    # Normalize aliases
     metrics = ["f1" if m == "f1_score" else m for m in metrics]
-    metrics = list(dict.fromkeys(metrics))  # drop duplicates while preserving order
+    metrics = list(dict.fromkeys(metrics))
     invalid = [m for m in metrics if m not in VALID_METRICS]
     if invalid:
         raise ValueError(f"Invalid metric(s): {', '.join(invalid)}")
@@ -204,6 +198,7 @@ def compute_per_population_stats(y_true, y_pred):
         pop_accuracy = float(correct / pop_size) if pop_size else float("nan")
         pop_precision = float(tp / (tp + fp)) if (tp + fp) else float("nan")
         pop_recall = float(tp / (tp + fn)) if (tp + fn) else float("nan")
+
         if (
             np.isnan(pop_precision)
             or np.isnan(pop_recall)
@@ -271,11 +266,46 @@ def metric_scalability(runtime_seconds, n_items):
     }
 
 
+def metric_mcc(y_true, y_pred):
+    try:
+        mcc = float(matthews_corrcoef(y_true, y_pred))
+    except Exception:
+        mcc = float("nan")
+    return {"mcc": mcc}
+
+
+def metric_population_frequency_correlation(y_true, y_pred):
+    labels = np.unique(np.concatenate([y_true, y_pred]))
+    true_freq = []
+    pred_freq = []
+    N = len(y_true)
+
+    for label in labels:
+        if label == 0:
+            continue
+        true_freq.append(np.sum(y_true == label) / N)
+        pred_freq.append(np.sum(y_pred == label) / N)
+
+    if len(true_freq) < 2:
+        return {"popfreq_corr": float("nan")}
+
+    r = np.corrcoef(true_freq, pred_freq)[0, 1]
+    return {"popfreq_corr": float(r)}
+
+
+def metric_aucroc(y_true, y_pred):
+    uniq = np.unique(y_true)
+    uniq = uniq[uniq != 0]
+    try:
+        y_true_bin = np.array([y_true == u for u in uniq]).T.astype(int)
+        y_pred_bin = np.array([y_pred == u for u in uniq]).T.astype(int)
+        auc = roc_auc_score(y_true_bin, y_pred_bin, average="macro")
+    except Exception:
+        auc = float("nan")
+    return {"aucroc": float(auc)}
+
+
 def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
-    """
-    Computes per-population metrics and optional runtime/overlap/scalability
-    for a single set of predictions.
-    """
     start = time.perf_counter()
 
     y_true, y_pred = strip_noise_labels(y_true, y_pred)
@@ -285,7 +315,6 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
 
     results = {}
 
-    # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
         per_population = compute_per_population_stats(y_true, y_pred)
         macro_precision, macro_recall, macro_f1 = compute_macro_scores(per_population)
@@ -314,6 +343,15 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
 
     if "overlap" in metrics_to_compute:
         results.update(metric_overlap(y_true, y_pred))
+
+    if "mcc" in metrics_to_compute:
+        results.update(metric_mcc(y_true, y_pred))
+
+    if "popfreq_corr" in metrics_to_compute:
+        results.update(metric_population_frequency_correlation(y_true, y_pred))
+
+    if "aucroc" in metrics_to_compute:
+        results.update(metric_aucroc(y_true, y_pred))
 
     runtime_seconds = time.perf_counter() - start
     if "runtime" in metrics_to_compute:
