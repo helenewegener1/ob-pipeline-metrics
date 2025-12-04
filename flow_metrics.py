@@ -319,7 +319,7 @@ def main():
         help="csv text file with header row (k values) and columns of predictions",
     )
     parser.add_argument(
-        "--data.true_labels",
+        "--labels_test",
         type=str,
         required=True,
         help="text file containing the true labels (1D)",
