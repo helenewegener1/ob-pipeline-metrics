@@ -260,7 +260,7 @@ def metric_aucroc(y_true, y_pred):
     try:
         y_true_bin = np.array([y_true == u for u in uniq]).T.astype(int)
         y_pred_bin = np.array([y_pred == u for u in uniq]).T.astype(int)
-        auc = roc_auc_score(y_true_bin, y_pred_bin, average="macro")
+        auc = roc_auc_score(y_true_bin, y_pred_bin, average="macro", multi_class="ovr")
     except Exception:
         auc = float("nan")
     return {"aucroc": float(auc)}
