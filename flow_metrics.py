@@ -2,26 +2,11 @@
 
 """
 Lightweight CLI for evaluating prediction-style outputs (e.g. cell type
-classification) using the same inputs as `run_metrics.py`, but focused on
-per-population prediction metrics instead of clustering comparison.
+classification), using global confusion-matrix-based metrics
+instead of per-population (per-label) metrics.
 
-Inputs mirror run_metrics:
-- --clustering.predicted_ks_range: csv-like file with header row of run IDs
-  (e.g. k=...) and one column of predictions per run
-- --data.true_labels: text file of ground-truth labels (1D)
-- --metric: comma-separated list from VALID_METRICS (or "all")
-- --output_dir/--name: where to write results; printed to stdout if omitted
-
-Metrics implemented (selected via --metric):
-- accuracy, precision, recall, f1 (per-population with macro averages)
-- mcc (Matthews correlation coefficient)
-- popfreq_corr (population frequency correlation)
-- aucroc (AUC ROC macro one-vs-rest)
-- runtime: time spent computing the metrics for that run
-- overlap: Jaccard overlap between predicted and true label sets (ignores 0)
-- scalability: runtime normalized by number of evaluated samples
-
-Note: runtime here measures only metric computation, not upstream model execution.
+All classification metrics (accuracy, precision, recall, F1)
+are now micro-averaged across all labels combined.
 """
 
 import argparse
@@ -33,8 +18,11 @@ import time
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import matthews_corrcoef, roc_auc_score
-
+from sklearn.metrics import (
+    confusion_matrix,
+    matthews_corrcoef,
+    roc_auc_score
+)
 
 VALID_METRICS = {
     "accuracy",
@@ -72,29 +60,6 @@ def _has_header(first_line):
     return False
 
 
-# def load_true_labels(data_file):
-#     first_line = _read_first_line(data_file)
-#     has_header = _has_header(first_line)
-# 
-#     opener = gzip.open if data_file.endswith(".gz") else open
-#     with opener(data_file, "rt") as handle:
-#         series = pd.read_csv(
-#             handle,
-#             header=0 if has_header else None,
-#             comment="#",
-#             na_values=["", '""', "nan", "NaN"],
-#             skip_blank_lines=False,
-#         ).iloc[:, 0]
-# 
-#     try:
-#         labels = pd.to_numeric(series, errors="coerce").to_numpy()
-#     except Exception as exc:
-#         raise ValueError("Invalid data structure, cannot parse labels.") from exc
-# 
-#     if labels.ndim != 1:
-#         raise ValueError("Invalid data structure, not a 1D matrix?")
-#     return labels
-
 def load_true_labels(data_file):
     opener = gzip.open if data_file.endswith(".gz") else open
     with opener(data_file, "rt") as handle:
@@ -103,13 +68,14 @@ def load_true_labels(data_file):
             header=None,
             comment="#",
             na_values=["", '""', "nan", "NaN"],
-            skip_blank_lines=True,  # <- skip empty lines
+            skip_blank_lines=True,
         ).iloc[:, 0]
-        
+
     labels = pd.to_numeric(series, errors="coerce").to_numpy()
     if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
     return labels
+
 
 def load_predicted_labels(data_file):
     first_line = _read_first_line(data_file)
@@ -147,6 +113,7 @@ def load_predicted_labels(data_file):
 
     if values.ndim == 1:
         values = values.reshape(-1, 1)
+
     if values.ndim != 2:
         raise ValueError("Invalid data structure, not a 2D matrix?")
 
@@ -155,6 +122,7 @@ def load_predicted_labels(data_file):
         if has_header
         else [f"run{i}" for i in range(values.shape[1])]
     )
+
     return [np.array(header, dtype=str), values]
 
 
@@ -172,11 +140,6 @@ def parse_metric_argument(metric_arg):
     return metrics
 
 
-def _nan_safe_mean(values):
-    vals = [v for v in values if not np.isnan(v)]
-    return float(np.mean(vals)) if vals else float("nan")
-
-
 def strip_noise_labels(y_true, y_pred):
     y_true = np.array(y_true, ndmin=1)
     y_pred = np.array(y_pred, ndmin=1)
@@ -184,63 +147,63 @@ def strip_noise_labels(y_true, y_pred):
     return y_true[mask], y_pred[mask]
 
 
-def compute_per_population_stats(y_true, y_pred):
-    per_population = {}
-    labels = np.unique(y_true)
-    for label in labels:
-        pop_mask = y_true == label
-        pop_size = pop_mask.sum()
-        correct = (y_pred[pop_mask] == label).sum()
-        tp = correct
-        fp = ((y_true != label) & (y_pred == label)).sum()
-        fn = ((y_true == label) & (y_pred != label)).sum()
+# -------------------------------------------------------
+# GLOBAL METRICS (REPLACES PER-POPULATION METRICS)
+# -------------------------------------------------------
 
-        pop_accuracy = float(correct / pop_size) if pop_size else float("nan")
-        pop_precision = float(tp / (tp + fp)) if (tp + fp) else float("nan")
-        pop_recall = float(tp / (tp + fn)) if (tp + fn) else float("nan")
+def compute_global_classification_stats(y_true, y_pred):
+    labels = np.unique(np.concatenate([y_true, y_pred]))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
 
-        if (
-            np.isnan(pop_precision)
-            or np.isnan(pop_recall)
-            or (pop_precision + pop_recall) == 0
-        ):
-            pop_f1 = float("nan")
-        else:
-            pop_f1 = float(
-                2 * pop_precision * pop_recall / (pop_precision + pop_recall)
-            )
+    tp = np.trace(cm)
+    total = cm.sum()
 
-        per_population[str(label)] = {
-            "accuracy": pop_accuracy,
-            "precision": pop_precision,
-            "recall": pop_recall,
-            "f1": pop_f1,
-            "support": int(pop_size),
-        }
-    return per_population
+    fp = cm.sum(axis=0) - np.diag(cm)
+    fn = cm.sum(axis=1) - np.diag(cm)
+    tn = total - (fp + fn + np.diag(cm))
+
+    precision = tp / (tp + fp.sum()) if (tp + fp.sum()) else float("nan")
+    recall = tp / (tp + fn.sum()) if (tp + fn.sum()) else float("nan")
+
+    if precision + recall > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = float("nan")
+
+    accuracy = tp / total if total else float("nan")
+
+    return {
+        "labels": labels.tolist(),
+        "global_confusion_matrix": cm.tolist(),
+        "tp": int(tp),
+        "fp_total": int(fp.sum()),
+        "fn_total": int(fn.sum()),
+        "tn_total": int(tn.sum()),
+        "global_accuracy": float(accuracy),
+        "global_precision": float(precision),
+        "global_recall": float(recall),
+        "global_f1": float(f1),
+    }
 
 
-def compute_macro_scores(per_population):
-    macro_precision = _nan_safe_mean([v["precision"] for v in per_population.values()])
-    macro_recall = _nan_safe_mean([v["recall"] for v in per_population.values()])
-    macro_f1 = _nan_safe_mean([v["f1"] for v in per_population.values()])
-    return macro_precision, macro_recall, macro_f1
-
+# -------------------------------------------------------
+# METRIC WRAPPERS
+# -------------------------------------------------------
 
 def metric_accuracy(base_stats):
-    return {"accuracy": base_stats["overall_accuracy"]}
+    return {"accuracy": base_stats["global_accuracy"]}
 
 
 def metric_precision(base_stats):
-    return {"precision_macro": base_stats["macro_precision"]}
+    return {"precision": base_stats["global_precision"]}
 
 
 def metric_recall(base_stats):
-    return {"recall_macro": base_stats["macro_recall"]}
+    return {"recall": base_stats["global_recall"]}
 
 
 def metric_f1(base_stats):
-    return {"f1_macro": base_stats["macro_f1"]}
+    return {"f1": base_stats["global_f1"]}
 
 
 def metric_overlap(y_true, y_pred):
@@ -250,8 +213,7 @@ def metric_overlap(y_true, y_pred):
     pred_labels.discard(0)
     union = true_labels | pred_labels
     intersection = true_labels & pred_labels
-    overlap = float(len(intersection) / len(union)) if union else float("nan")
-    return {"overlap": overlap}
+    return {"overlap": float(len(intersection) / len(union)) if union else float("nan")}
 
 
 def metric_runtime(runtime_seconds):
@@ -268,10 +230,9 @@ def metric_scalability(runtime_seconds, n_items):
 
 def metric_mcc(y_true, y_pred):
     try:
-        mcc = float(matthews_corrcoef(y_true, y_pred))
+        return {"mcc": float(matthews_corrcoef(y_true, y_pred))}
     except Exception:
-        mcc = float("nan")
-    return {"mcc": mcc}
+        return {"mcc": float("nan")}
 
 
 def metric_population_frequency_correlation(y_true, y_pred):
@@ -305,27 +266,27 @@ def metric_aucroc(y_true, y_pred):
     return {"aucroc": float(auc)}
 
 
+# -------------------------------------------------------
+# MAIN METRIC COMPUTATION
+# -------------------------------------------------------
+
 def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
     start = time.perf_counter()
 
     y_true, y_pred = strip_noise_labels(y_true, y_pred)
-
     if y_true.shape[0] != y_pred.shape[0]:
-        raise ValueError("Predicted labels and true labels must align in length.")
+        raise ValueError("Predicted labels and true labels must match in length.")
 
     results = {}
 
-    if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
-        per_population = compute_per_population_stats(y_true, y_pred)
-        macro_precision, macro_recall, macro_f1 = compute_macro_scores(per_population)
+    if any(m in CLASSIFICATION_METRICS for m in metrics_to_compute):
+        global_stats = compute_global_classification_stats(y_true, y_pred)
         base_stats = {
-            "per_population": per_population,
-            "overall_accuracy": (
-                float((y_true == y_pred).mean()) if y_true.size else float("nan")
-            ),
-            "macro_precision": macro_precision,
-            "macro_recall": macro_recall,
-            "macro_f1": macro_f1,
+            "global_accuracy": global_stats["global_accuracy"],
+            "global_precision": global_stats["global_precision"],
+            "global_recall": global_stats["global_recall"],
+            "global_f1": global_stats["global_f1"],
+            "global_stats": global_stats,
         }
 
         metric_dispatch = {
@@ -339,7 +300,7 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
             if metric_name in metrics_to_compute:
                 results.update(fn())
 
-        results["per_population"] = per_population
+        results["global_stats"] = global_stats
 
     if "overlap" in metrics_to_compute:
         results.update(metric_overlap(y_true, y_pred))
@@ -354,13 +315,19 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
         results.update(metric_aucroc(y_true, y_pred))
 
     runtime_seconds = time.perf_counter() - start
+
     if "runtime" in metrics_to_compute:
         results.update(metric_runtime(runtime_seconds))
+
     if "scalability" in metrics_to_compute:
         results.update(metric_scalability(runtime_seconds, y_true.size))
 
     return results
 
+
+# -------------------------------------------------------
+# MAIN CLI
+# -------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Flow prediction metrics runner")
